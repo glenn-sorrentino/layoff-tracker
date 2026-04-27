@@ -278,10 +278,10 @@ def build_next_event_candidates(rows: list[WarnRow], publish_date: date) -> list
         effective_date = row.effective_date
         assert effective_date is not None
 
-        location_phrase = row.county
         linkedin = (
-            f"Next layoffs in California will happen at {row.company}, impacting "
-            f"{format_number(row.employees)} workers in {location_phrase} on {format_date(effective_date)}."
+            f"The next scheduled layoff in California's current WARN file is at {row.company} "
+            f"in {row.county}, effective {format_date(effective_date)}."
+            f"\n\nThe notice lists {format_number(row.employees)} affected workers."
         )
 
         if row.address:
@@ -341,10 +341,10 @@ def build_summary_candidates(rows: list[WarnRow], publish_date: date) -> list[di
         impacted_locations = len({(row.company, row.address, row.county_normalized) for row in same_day_rows})
 
         next_day_copy = (
-            f"The next California WARN notices take effect on {format_date(first_date)}, affecting "
-            f"{format_number(impacted_workers)} workers across {format_number(impacted_locations)} location"
-            f"{'' if impacted_locations == 1 else 's'} in {format_number(impacted_counties)} "
-            f"count{'y' if impacted_counties == 1 else 'ies'}."
+            f"The next wave of California WARN notices takes effect on {format_date(first_date)}."
+            f"\n\nThe current file shows {format_number(impacted_workers)} affected workers across "
+            f"{format_number(impacted_locations)} location{'' if impacted_locations == 1 else 's'} in "
+            f"{format_number(impacted_counties)} count{'y' if impacted_counties == 1 else 'ies'} on that date."
         )
 
         next_candidates.append(
@@ -372,12 +372,13 @@ def build_summary_candidates(rows: list[WarnRow], publish_date: date) -> list[di
 
     range_label = f"{format_date(range_start)} to {format_date(range_end)}"
     total_copy = (
-        f"From {range_label}, {format_number(total_layoffs)} workers in California are scheduled "
-        f"to be impacted by layoffs in the current WARN file."
+        f"The current California WARN file spans {range_label}."
+        f"\n\nAcross that period, it lists {format_number(total_layoffs)} workers affected by layoffs statewide."
     )
     counties_copy = (
-        f"{format_number(county_count)} counties in California are represented in WARN notices from "
-        f"{range_label}."
+        f"The current California WARN file spans {range_label}."
+        f"\n\nIt includes layoff notices across {format_number(county_count)} California "
+        f"count{'y' if county_count == 1 else 'ies'}."
     )
 
     return next_candidates + [
