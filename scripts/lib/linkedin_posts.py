@@ -258,171 +258,285 @@ def fingerprint_for(parts: list[str]) -> str:
     return digest
 
 
-def event_sort_key(row: WarnRow) -> tuple[Any, ...]:
-    return (
-        row.effective_date or date.max,
-        -row.employees,
-        row.company.lower(),
-        row.county_normalized.lower(),
-        row.address.lower(),
-    )
+LEARN_MORE_URL = "https://ca-warn.github.io/layoff-tracker/"
 
 
-def build_next_event_candidates(rows: list[WarnRow], publish_date: date) -> list[dict[str, Any]]:
-    upcoming_rows = [
-        row for row in rows if row.effective_date is not None and row.effective_date >= publish_date
+def rows_for_date(rows: list[WarnRow], target_date: date) -> list[WarnRow]:
+    return [
+        row
+        for row in rows
+        if row.effective_date is not None and row.effective_date == target_date
     ]
-    candidates: list[dict[str, Any]] = []
 
-    for row in sorted(upcoming_rows, key=event_sort_key):
-        effective_date = row.effective_date
-        assert effective_date is not None
 
-        linkedin = (
-            f"The next scheduled layoff in California's current WARN file is at {row.company} "
-            f"in {row.county}, effective {format_date(effective_date)}."
-            f"\n\nThe notice lists {format_number(row.employees)} affected workers."
-        )
+def rows_for_month(rows: list[WarnRow], target_date: date) -> list[WarnRow]:
+    return [
+        row
+        for row in rows
+        if row.effective_date is not None
+        and row.effective_date.year == target_date.year
+        and row.effective_date.month == target_date.month
+    ]
 
-        if row.address:
-            linkedin += f"\n\nLocation: {row.address}."
 
-        if row.industry:
-            linkedin += f"\n\nIndustry: {row.industry}."
+def week_start(target_date: date) -> date:
+    return target_date - timedelta(days=target_date.weekday())
 
-        fingerprint = fingerprint_for(
+
+def rows_for_week(rows: list[WarnRow], target_date: date) -> list[WarnRow]:
+    start = week_start(target_date)
+    end = start + timedelta(days=6)
+    return [
+        row
+        for row in rows
+        if row.effective_date is not None
+        and start <= row.effective_date <= end
+    ]
+
+
+def format_detail_block(row: WarnRow) -> str:
+    lines = [
+        f"Company: {row.company}",
+        f"Workers Impacted: {format_number(row.employees)}",
+        f"Type: {row.layoff_closure or '—'}",
+        f"Location: {row.address or '—'}",
+        f"Industry: {row.industry or '—'}",
+    ]
+    return "\n".join(lines)
+
+
+def format_learn_more() -> str:
+    return f"Learn more: {LEARN_MORE_URL}"
+
+
+def format_count_label(value: int, singular: str, plural: str | None = None) -> str:
+    if value == 1:
+        return singular
+    return plural or f"{singular}s"
+
+
+def quarter_number(target_date: date) -> int:
+    return ((target_date.month - 1) // 3) + 1
+
+
+def build_todays_event_candidate(today_rows: list[WarnRow], publish_date: date) -> dict[str, Any] | None:
+    if len(today_rows) != 1:
+        return None
+
+    row = today_rows[0]
+    linkedin = (
+        f"Today, there is a scheduled layoff in California at {row.company} in {row.county}."
+        f"\n\n{format_detail_block(row)}"
+        f"\n\n{format_learn_more()}"
+    )
+    return {
+        "fingerprint": fingerprint_for(
             [
-                "next-event",
+                "todays-event",
+                publish_date.isoformat(),
                 row.company,
                 row.county_normalized,
                 row.address,
-                effective_date.isoformat(),
                 str(row.employees),
             ]
-        )
-
-        candidates.append(
-            {
-                "fingerprint": fingerprint,
-                "linkedin": linkedin,
-                "post_type": "next_event",
-                "event": {
-                    "company": row.company,
-                    "county": row.county,
-                    "county_normalized": row.county_normalized,
-                    "address": row.address,
-                    "effective_date": effective_date.isoformat(),
-                    "employees": row.employees,
-                    "industry": row.industry,
-                    "layoff_closure": row.layoff_closure,
-                },
-                "priority": "upcoming",
-            }
-        )
-
-    return candidates
+        ),
+        "linkedin": linkedin,
+        "post_type": "todays_event",
+        "event": {
+            "company": row.company,
+            "county": row.county,
+            "county_normalized": row.county_normalized,
+            "address": row.address,
+            "effective_date": publish_date.isoformat(),
+            "employees": row.employees,
+            "industry": row.industry,
+            "layoff_closure": row.layoff_closure,
+        },
+    }
 
 
-def build_summary_candidates(rows: list[WarnRow], publish_date: date) -> list[dict[str, Any]]:
+def build_todays_summary_candidate(today_rows: list[WarnRow], publish_date: date) -> dict[str, Any] | None:
+    if len(today_rows) <= 1:
+        return None
+
+    total_workers = sum(row.employees for row in today_rows)
+    company_count = len(today_rows)
+    detail_blocks = "\n\n".join(format_detail_block(row) for row in today_rows)
+    linkedin = (
+        f"Today, there are {format_number(total_workers)} scheduled layoffs in California across "
+        f"{format_number(company_count)} {format_count_label(company_count, 'company', 'companies')}:"
+        f"\n\n{detail_blocks}"
+        f"\n\n{format_learn_more()}"
+    )
+    return {
+        "fingerprint": fingerprint_for(
+            [
+                "todays-summary",
+                publish_date.isoformat(),
+                str(total_workers),
+                str(company_count),
+                *[
+                    "|".join(
+                        [
+                            row.company,
+                            row.county_normalized,
+                            row.address,
+                            str(row.employees),
+                        ]
+                    )
+                    for row in today_rows
+                ],
+            ]
+        ),
+        "linkedin": linkedin,
+        "post_type": "todays_summary",
+        "summary": {
+            "effective_date": publish_date.isoformat(),
+            "workers": total_workers,
+            "company_count": company_count,
+        },
+    }
+
+
+def build_no_layoffs_candidate(publish_date: date) -> dict[str, Any]:
+    linkedin = f"\N{PARTY POPPER} There are no scheduled layoffs in California today!\n\n{format_learn_more()}"
+    return {
+        "fingerprint": fingerprint_for(["no-layoffs", publish_date.isoformat()]),
+        "linkedin": linkedin,
+        "post_type": "no_layoffs",
+        "summary": {"effective_date": publish_date.isoformat()},
+    }
+
+
+def build_no_layoffs_this_week_candidate(publish_date: date) -> dict[str, Any]:
+    start = week_start(publish_date)
+    end = start + timedelta(days=6)
+    linkedin = (
+        f"\N{PARTY POPPER} There are no scheduled layoffs in California this week "
+        f"({format_date(start)} to {format_date(end)})!"
+        f"\n\n{format_learn_more()}"
+    )
+    return {
+        "fingerprint": fingerprint_for(["no-layoffs-this-week", start.isoformat()]),
+        "linkedin": linkedin,
+        "post_type": "no_layoffs_this_week",
+        "summary": {
+            "week_start": start.isoformat(),
+            "week_end": end.isoformat(),
+        },
+    }
+
+
+def build_total_layoffs_candidate(rows: list[WarnRow], publish_date: date) -> dict[str, Any]:
     range_start, range_end = compute_date_range(rows)
     total_layoffs = sum(row.employees for row in rows)
     county_count = len({row.county_normalized for row in rows})
-
-    upcoming_rows = [
-        row for row in rows if row.effective_date is not None and row.effective_date >= publish_date
-    ]
-    next_candidates: list[dict[str, Any]] = []
-
-    if upcoming_rows:
-        first_date = min(row.effective_date for row in upcoming_rows if row.effective_date is not None)
-        same_day_rows = [row for row in upcoming_rows if row.effective_date == first_date]
-        impacted_workers = sum(row.employees for row in same_day_rows)
-        impacted_counties = len({row.county_normalized for row in same_day_rows})
-        impacted_locations = len({(row.company, row.address, row.county_normalized) for row in same_day_rows})
-
-        next_day_copy = (
-            f"The next wave of California WARN notices takes effect on {format_date(first_date)}."
-            f"\n\nThe current file shows {format_number(impacted_workers)} affected workers across "
-            f"{format_number(impacted_locations)} location{'' if impacted_locations == 1 else 's'} in "
-            f"{format_number(impacted_counties)} count{'y' if impacted_counties == 1 else 'ies'} on that date."
-        )
-
-        next_candidates.append(
-            {
-                "fingerprint": fingerprint_for(
-                    [
-                        "next-day-summary",
-                        first_date.isoformat(),
-                        str(impacted_workers),
-                        str(impacted_locations),
-                        str(impacted_counties),
-                    ]
-                ),
-                "linkedin": next_day_copy,
-                "post_type": "next_day_summary",
-                "summary": {
-                    "effective_date": first_date.isoformat(),
-                    "workers": impacted_workers,
-                    "locations": impacted_locations,
-                    "counties": impacted_counties,
-                },
-                "priority": "upcoming_summary",
-            }
-        )
-
     range_label = f"{format_date(range_start)} to {format_date(range_end)}"
-    total_copy = (
+    linkedin = (
         f"The current California WARN file spans {range_label}."
-        f"\n\nAcross that period, it lists {format_number(total_layoffs)} workers affected by layoffs statewide."
+        f"\n\nAcross that period, it lists {format_number(total_layoffs)} workers affected by layoffs in "
+        f"{format_number(county_count)} California {format_count_label(county_count, 'county', 'counties')}."
+        f"\n\n{format_learn_more()}"
     )
-    counties_copy = (
-        f"The current California WARN file spans {range_label}."
-        f"\n\nIt includes layoff notices across {format_number(county_count)} California "
-        f"count{'y' if county_count == 1 else 'ies'}."
-    )
+    return {
+        "fingerprint": fingerprint_for(
+            [
+                "total-layoffs",
+                str(publish_date.year),
+                f"Q{quarter_number(publish_date)}",
+                range_start.isoformat() if range_start else "",
+                range_end.isoformat() if range_end else "",
+                str(total_layoffs),
+                str(county_count),
+            ]
+        ),
+        "linkedin": linkedin,
+        "post_type": "total_layoffs",
+        "summary": {
+            "range_start": range_start.isoformat() if range_start else None,
+            "range_end": range_end.isoformat() if range_end else None,
+            "total_layoffs": total_layoffs,
+            "county_count": county_count,
+        },
+    }
 
-    return next_candidates + [
-        {
-            "fingerprint": fingerprint_for(
-                [
-                    "range-total",
-                    range_start.isoformat() if range_start else "",
-                    range_end.isoformat() if range_end else "",
-                    str(total_layoffs),
-                ]
-            ),
-            "linkedin": total_copy,
-            "post_type": "total_layoffs",
-            "summary": {
-                "range_start": range_start.isoformat() if range_start else None,
-                "range_end": range_end.isoformat() if range_end else None,
-                "total_layoffs": total_layoffs,
-            },
-            "priority": "range_total",
+
+def build_this_month_impact_candidate(rows: list[WarnRow], publish_date: date) -> dict[str, Any]:
+    month_rows = rows_for_month(rows, publish_date)
+    notice_count = len(month_rows)
+    company_count = len({row.company for row in month_rows})
+    county_count = len({row.county_normalized for row in month_rows})
+    month_label = publish_date.strftime("%B")
+
+    if notice_count == 0:
+        linkedin = (
+            f"In {month_label}, there are no layoff notices currently scheduled in California's WARN file."
+            f"\n\n{format_learn_more()}"
+        )
+    else:
+        linkedin = (
+            f"In {month_label}, there are {format_number(notice_count)} layoff notices scheduled for "
+            f"{format_number(company_count)} {format_count_label(company_count, 'company', 'companies')} across "
+            f"{format_number(county_count)} California {format_count_label(county_count, 'county', 'counties')}."
+            f"\n\n{format_learn_more()}"
+        )
+
+    return {
+        "fingerprint": fingerprint_for(
+            [
+                "this-month-impact",
+                f"{publish_date.year:04d}-{publish_date.month:02d}",
+                str(notice_count),
+                str(company_count),
+                str(county_count),
+            ]
+        ),
+        "linkedin": linkedin,
+        "post_type": "this_month_impact",
+        "summary": {
+            "year": publish_date.year,
+            "month": publish_date.month,
+            "notice_count": notice_count,
+            "company_count": company_count,
+            "county_count": county_count,
         },
-        {
-            "fingerprint": fingerprint_for(
-                [
-                    "county-impact",
-                    range_start.isoformat() if range_start else "",
-                    range_end.isoformat() if range_end else "",
-                    str(county_count),
-                ]
-            ),
-            "linkedin": counties_copy,
-            "post_type": "county_impact",
-            "summary": {
-                "range_start": range_start.isoformat() if range_start else None,
-                "range_end": range_end.isoformat() if range_end else None,
-                "county_count": county_count,
-            },
-            "priority": "county_impact",
-        },
-    ]
+    }
 
 
 def select_post(rows: list[WarnRow], publish_date: date, existing_fingerprints: set[str]) -> dict[str, Any] | None:
-    candidates = build_next_event_candidates(rows, publish_date) + build_summary_candidates(rows, publish_date)
+    today_rows = rows_for_date(rows, publish_date)
+    month_rows = rows_for_month(rows, publish_date)
+    week_rows = rows_for_week(rows, publish_date)
+    today_rows = sorted(
+        today_rows,
+        key=lambda row: (-row.employees, row.company.lower(), row.county_normalized.lower(), row.address.lower()),
+    )
+
+    candidates: list[dict[str, Any]] = []
+
+    todays_summary = build_todays_summary_candidate(today_rows, publish_date)
+    if todays_summary is not None:
+        candidates.append(todays_summary)
+
+    todays_event = build_todays_event_candidate(today_rows, publish_date)
+    if todays_event is not None:
+        candidates.append(todays_event)
+
+    if not today_rows:
+        if not month_rows:
+            if publish_date.day == 1:
+                candidates.append(build_this_month_impact_candidate(rows, publish_date))
+        elif not week_rows:
+            if publish_date.weekday() == 0:
+                candidates.append(build_no_layoffs_this_week_candidate(publish_date))
+        elif publish_date.day == 1 and publish_date.month in {1, 4, 7, 10}:
+            candidates.append(build_total_layoffs_candidate(rows, publish_date))
+        elif publish_date.day == 1:
+            candidates.append(build_this_month_impact_candidate(rows, publish_date))
+        else:
+            if month_rows:
+                candidates.append(build_no_layoffs_candidate(publish_date))
+
     for candidate in candidates:
         if candidate["fingerprint"] not in existing_fingerprints:
             return candidate

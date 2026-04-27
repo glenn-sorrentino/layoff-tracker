@@ -101,6 +101,18 @@ def resolve_author_urn(token: str) -> str:
     return f"urn:li:person:{member_id}"
 
 
+def enforce_author_policy(author_urn: str) -> None:
+    required_type = os.environ.get("LINKEDIN_REQUIRED_AUTHOR_TYPE", "organization").strip().lower()
+    if required_type == "organization" and not author_urn.startswith("urn:li:organization:"):
+        raise RuntimeError(
+            "Refusing to publish with a personal LinkedIn author. "
+            "Set LINKEDIN_AUTHOR_URN to an organization URN such as urn:li:organization:... "
+            "or override LINKEDIN_REQUIRED_AUTHOR_TYPE if personal posting is explicitly intended."
+        )
+    if required_type == "person" and not author_urn.startswith("urn:li:person:"):
+        raise RuntimeError("Refusing to publish because LINKEDIN_AUTHOR_URN is not a person URN.")
+
+
 def publish_post(token: str, author_urn: str, commentary: str) -> tuple[str, str]:
     last_error: RuntimeError | None = None
     for version in linkedin_version_candidates(os.environ.get("LINKEDIN_API_VERSION")):
@@ -161,6 +173,7 @@ def main() -> int:
         raise SystemExit("Missing required environment variable: LINKEDIN_ACCESS_TOKEN")
 
     author_urn = resolve_author_urn(token)
+    enforce_author_policy(author_urn)
     version, post_id = publish_post(token, author_urn, post["social"]["linkedin"])
 
     publication = {
